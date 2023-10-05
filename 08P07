@@ -1,0 +1,76 @@
+// Arduino pin assignment
+#define PIN_LED  9
+#define PIN_TRIG 12   // sonar sensor TRIGGER
+#define PIN_ECHO 13   // sonar sensor ECHO
+
+// configurable parameters
+#define SND_VEL 346.0     // sound velocity at 24 celsius degree (unit: m/sec)
+#define INTERVAL 25      // sampling interval (unit: msec)
+#define PULSE_DURATION 10 // ultra-sound Pulse Duration (unit: usec)
+#define _DIST_MIN 100.0   // minimum distance to be measured (unit: mm)
+#define _DIST_MAX 300.0   // maximum distance to be measured (unit: mm)
+
+#define TIMEOUT ((INTERVAL / 2) * 1000.0) // maximum echo waiting time (unit: usec)
+#define SCALE (0.001 * 0.5 * SND_VEL) // coefficient to convert duration to distance
+
+unsigned long last_sampling_time;   // unit: msec
+
+void setup() {
+  // initialize GPIO pins
+  pinMode(PIN_LED, OUTPUT);
+  pinMode(PIN_TRIG, OUTPUT);  // sonar TRIGGER
+  pinMode(PIN_ECHO, INPUT);   // sonar ECHO
+  digitalWrite(PIN_TRIG, LOW);  // turn-off Sonar 
+  
+  // initialize serial port
+  Serial.begin(57600);
+}
+
+void loop() {
+  float distance;
+
+  // wait until the next sampling time. 
+  // millis() returns the number of milliseconds since the program started.
+  // will overflow after 50 days.
+  if (millis() < (last_sampling_time + INTERVAL))
+    return;
+
+  distance = USS_measure(PIN_TRIG, PIN_ECHO); // read distance
+
+  // Map the distance to LED brightness
+  int ledBrightness;
+
+  if (distance < 150) {
+    ledBrightness = map(distance, _DIST_MIN, 150, 0, 100); // 0% to 100%
+  } else if (distance > 250) {
+    ledBrightness = map(distance, 250, _DIST_MAX, 100, 0); // 100% to 0%
+  } else {
+    ledBrightness = 100; // 50%
+  }
+
+  // Ensure LED brightness is within the valid range
+  ledBrightness = constrain(ledBrightness, 0, 100);
+
+  analogWrite(PIN_LED, map(ledBrightness, 0, 100, 0, 255)); // Set LED brightness (0-255)
+
+  // Output the distance to the serial port
+  Serial.print("Min:");        Serial.print(_DIST_MIN);
+  Serial.print(",distance:");  Serial.print(distance);
+  Serial.print(",Max:");       Serial.print(_DIST_MAX);
+  Serial.println("");
+  
+  // Do something here
+  
+  // Update the last sampling time
+  last_sampling_time += INTERVAL;
+}
+
+// Get a distance reading from USS. The return value is in millimeters.
+float USS_measure(int TRIG, int ECHO)
+{
+  digitalWrite(TRIG, HIGH);
+  delayMicroseconds(PULSE_DURATION);
+  digitalWrite(TRIG, LOW);
+  
+  return pulseIn(ECHO, HIGH, TIMEOUT) * SCALE; // unit: mm
+}
