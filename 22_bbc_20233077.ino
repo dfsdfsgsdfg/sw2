@@ -1,37 +1,148 @@
+#include <Servo.h>
+
 // Arduino pin assignment
-#define PIN_IR A0
+#define PIN_LED   9
+#define PIN_SERVO 10
+#define PIN_IR    A0
+
+// Event interval parameters
+#define _INTERVAL_DIST    20 // distance sensor interval (unit: ms)
+#define _INTERVAL_SERVO   20 // servo interval (unit: ms)
+#define _INTERVAL_SERIAL  20 // serial interval (unit: ms)
+
+// EMA filter configuration for the IR distance sensor
+#define _EMA_ALPHA 0.6  // EMA weight of new sample (range: 0 to 1)
+                          // Setting EMA to 1 effectively disables EMA filter.
+
+// Servo adjustment - Set _DUTY_MAX, _NEU, _MIN with your own numbers
+#define _DUTY_MAX 2750 // 2000
+#define _DUTY_NEU 1950 // 1500
+#define _DUTY_MIN 1100 // 1000
+
+#define _SERVO_ANGLE_DIFF  93  // Replace with |D - E| degree
+#define _SERVO_SPEED       100  // servo speed
+
+#define _BANGBANG_RANGE    615  // duty up and down for bangbang control
+
+// Target Distance
+#define _DIST_TARGET    175 // Center of the rail (unit:mm)
+
+// global variables
+
+Servo myservo;
+
+float dist_ema;     // unit: mm
+
+int duty_change_per_interval; // maximum duty difference per interval
+int duty_target;    // Target duty
+int duty_current;      // Current duty
+int duty_adj;       // Level adjustment
+
+unsigned long last_sampling_time_dist;   // unit: msec
+unsigned long last_sampling_time_servo;  // unit: msec
+unsigned long last_sampling_time_serial; // unit: msec
+
+bool event_dist, event_servo, event_serial; // event triggered?
 
 void setup()
 {
-  Serial.begin(1000000);  // initialize serial port
+  // initialize GPIO pins
+  pinMode(PIN_LED,OUTPUT);
+  myservo.attach(PIN_SERVO);
+
+  duty_target = duty_current = _DUTY_NEU;
+  myservo.writeMicroseconds(duty_current);
+
+  // initialize serial port
+  Serial.begin(1000000);  
+    
+  // convert angular speed into duty change per interval.
+  duty_change_per_interval = 
+    (float)(_DUTY_MAX - _DUTY_MIN) * ((float)_SERVO_SPEED / _SERVO_ANGLE_DIFF) * (_INTERVAL_SERVO / 1000.0); 
 }
 
 void loop()
 {
-  unsigned int filtered; // Voltage values from the IR sensor (0 ~ 1023)
-
-  while (Serial.available() == 0)
-    ;
-  Serial.read();
+  unsigned long time_curr = millis();
   
-  // Take a median value from multiple measurements
-  filtered = ir_sensor_filtered(10, 0.5, 0); // Replace n with your desired value
-  Serial.print("FLT:"); Serial.print(filtered);
-  Serial.print(" ==> Distance:"); Serial.println(volt_to_distance(filtered));
-  //while (1) ;
+  // wait until next event time
+  if (time_curr >= (last_sampling_time_dist + _INTERVAL_DIST)) {
+        last_sampling_time_dist += _INTERVAL_DIST;
+        event_dist = true;
+  }
+  if (time_curr >= (last_sampling_time_servo + _INTERVAL_SERVO)) {
+        last_sampling_time_servo += _INTERVAL_SERVO;
+        event_servo = true;
+  }
+  if (time_curr >= (last_sampling_time_serial + _INTERVAL_SERIAL)) {
+        last_sampling_time_serial += _INTERVAL_SERIAL;
+        event_serial = true;
+  }
+    
+  if (event_dist) {
+    float dist_filtered; // unit: mm
+    event_dist = false;
+
+    // get a distance reading from the distance sensor
+    dist_filtered = volt_to_distance(ir_sensor_filtered(10, 0.5, 0));
+    dist_ema = _EMA_ALPHA * dist_filtered + (1.0 - _EMA_ALPHA) * dist_ema;
+
+    // bang bang control
+    if (dist_ema > _DIST_TARGET) {
+      duty_target = _DUTY_NEU - _BANGBANG_RANGE;
+      digitalWrite(PIN_LED, 0);
+    } else if (dist_ema < _DIST_TARGET) {
+      duty_target = _DUTY_NEU + _BANGBANG_RANGE;
+      digitalWrite(PIN_LED, 1);
+    }
+  }
+  
+  if (event_servo) {
+    event_servo = false;
+     
+    // adjust duty_current toward duty_target by duty_change_per_interval
+    if (duty_target > duty_current) {
+      duty_current += duty_change_per_interval;
+      if (duty_current > duty_target)
+          duty_current = duty_target;
+    } else if (duty_target < duty_current) {
+      duty_current -= duty_change_per_interval;
+      if (duty_current < duty_target)
+        duty_current = duty_target;
+    }
+    
+    // servo arm protection
+    if (duty_current < _DUTY_MIN)
+      duty_current = _DUTY_MIN;
+    else if (duty_current > _DUTY_MAX) 
+      duty_current = _DUTY_MAX;
+
+    // update servo position
+    myservo.writeMicroseconds(duty_current);
+  }
+  
+  if (event_serial) {
+    event_serial = false;
+    
+    // output the read value to the serial port
+    Serial.print("TARGET:"); Serial.print(_DIST_TARGET);
+    Serial.print(",DIST:"); Serial.print(dist_ema);
+    Serial.print(",duty_target:"); Serial.print(duty_target);
+    Serial.print(",duty_current:"); Serial.println(duty_current);
+  }
 }
 
-float volt_to_distance(unsigned int a_value) 
+float volt_to_distance(int a_value)
 {
-  // Replace below line with the equation obtained from nonlinear regression analysis
-  return 771 - 3.79 * a_value + 6.72E-03 * a_value * a_value - 4.26E-06 * a_value * a_value * a_value;
-
-
+  // Replace line into your own equation
+  // return (6762.0 / (a_value - 9) - 4.0) * 10.0; 
+  return 771 - 3.79 * a_value + 6.72E-03 * a_value * a_value - 4.26E-06 * a_value * a_value * a_value;;
 }
 
 int compare(const void *a, const void *b) {
   return (*(unsigned int *)a - *(unsigned int *)b);
 }
+
 unsigned int ir_sensor_filtered(unsigned int n, float position, int verbose)
 {
   // Eliminate spiky noise of an IR distance sensor by repeating measurement and taking a middle value
@@ -45,7 +156,8 @@ unsigned int ir_sensor_filtered(unsigned int n, float position, int verbose)
   // The output of Sharp infrared sensor includes lots of spiky noise.
   // To eliminate such a spike, ir_sensor_filtered() performs the following two steps:
   // Step 1. Repeat measurement n times and collect n * position smallest samples, where 0 <= postion <= 1.
-  // Step 2. Return the position'th sample after sorting the collected samples.​
+  // Step 2. Return the position'th sample after sorting the collected samples.
+
   // returns 0, if any error occurs
 
   unsigned int *ir_val, ret_val;
@@ -53,6 +165,7 @@ unsigned int ir_sensor_filtered(unsigned int n, float position, int verbose)
  
   if (verbose >= 2)
     start_time = millis(); 
+
   if ((n == 0) || (n > 100) || (position < 0.0) || (position > 1))
     return 0;
     
@@ -64,6 +177,7 @@ unsigned int ir_sensor_filtered(unsigned int n, float position, int verbose)
     Serial.print(", position: "); Serial.print(position); 
     Serial.print(", ret_idx: ");  Serial.println((unsigned int)(n * position)); 
   }
+
   ir_val = (unsigned int *)malloc(sizeof(unsigned int) * n);
   if (ir_val == NULL)
     return 0;
